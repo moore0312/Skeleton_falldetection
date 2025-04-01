@@ -1,0 +1,22 @@
+# Python cache
+__pycache__/
+*.pyc
+
+# Models and large data
+*.pth
+*.pkl
+*.gif
+*.mp4
+*.avi
+
+# Outputs and experiment results
+output/
+Data/data_backup/
+Data/data1/
+Data/data2/
+Data/data3/
+Actionsrecognition/saved/
+
+# System/IDE files
+.DS_Store
+.vscode/
