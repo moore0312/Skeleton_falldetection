@@ -1,50 +1,56 @@
-<h1> Human Falling Detection and Tracking </h1>
+# Human-Falling-Detect-Tracks
 
-Using Tiny-YOLO oneclass to detect each person in the frame and use 
-[AlphaPose](https://github.com/MVIG-SJTU/AlphaPose) to get skeleton-pose and then use
-[ST-GCN](https://github.com/yysijie/st-gcn) model to predict action from every 30 frames 
-of each person tracks.
+本專案旨在偵測影片中是否發生人體跌倒事件。透過結合 AlphaPose 骨架估測與 ST-GCN（Temporal Spatial Graph Convolutional Network）進行姿態分類，實現動作辨識與跌倒判斷。
 
-Which now support 7 actions: Standing, Walking, Sitting, Lying Down, Stand up, Sit down, Fall Down.
+## 🎯 專案目標
 
-<div align="center">
-    <img src="sample1.gif" width="416">
-</div>
+- 使用 AlphaPose 擷取人體全身骨架。
+- 將骨架關鍵點資料輸入 ST-GCN（TSSTG）模型，判斷是否為跌倒。
+- 最終以「每支影片是否為跌倒」作為分類任務，並計算整體準確率（accuracy）。
 
-## Prerequisites
+---
 
-- Python > 3.6
-- Pytorch > 1.3.1
+## 🧩 系統架構
 
-Original test run on: i7-8750H CPU @ 2.20GHz x12, GeForce RTX 2070 8GB, CUDA 10.2
+1. **偵測與姿態估測**：使用 YOLOv3-Tiny 和 AlphaPose 取得人體骨架。
+2. **追蹤**：整合 DeepSort 或其他 tracker 確保骨架追蹤一致性。
+3. **動作辨識**：將骨架序列輸入 ST-GCN 模型辨識動作。
+4. **跌倒判斷**：若預測結果為 fall，則視為跌倒事件。
 
-## Data
+---
 
-This project has trained a new Tiny-YOLO oneclass model to detect only person objects and to reducing 
-model size. Train with rotation augmented [COCO](http://cocodataset.org/#home) person keypoints dataset 
-for more robust person detection in a variant of angle pose.
+## 📂 資料夾結構（精簡）
 
-For actions recognition used data from [Le2i](http://le2i.cnrs.fr/Fall-detection-Dataset?lang=fr)
-Fall detection Dataset (Coffee room, Home) extract skeleton-pose by AlphaPose and labeled each action 
-frames by hand for training ST-GCN model.
-
-## Pre-Trained Models
-
-- Tiny-YOLO oneclass - [.pth](https://drive.google.com/file/d/1obEbWBSm9bXeg10FriJ7R2cGLRsg-AfP/view?usp=sharing),
-[.cfg](https://drive.google.com/file/d/19sPzBZjAjuJQ3emRteHybm2SG25w9Wn5/view?usp=sharing)
-- SPPE FastPose (AlphaPose) - [resnet101](https://drive.google.com/file/d/1N2MgE1Esq6CKYA6FyZVKpPwHRyOCrzA0/view?usp=sharing),
-[resnet50](https://drive.google.com/file/d/1IPfCDRwCmQDnQy94nT1V-_NVtTEi4VmU/view?usp=sharing)
-- ST-GCN action recognition - [tsstg](https://drive.google.com/file/d/1mQQ4JHe58ylKbBqTjuKzpwN2nwKOWJ9u/view?usp=sharing)
-
-## Basic Use
-
-1. Download all pre-trained models into ./Models folder.
-2. Run main.py
 ```
-    python main.py ${video file or camera source}
+Human-Falling-Detect-Tracks/
+├── main.py                     # 主推論腳本
+├── evaluation.py               # 評估準確率用
+├── Models/                     # 儲存模型權重（不含在 GitHub）
+├── Data/                       # 自製資料與標註檔
+├── Actionsrecognition/         # ST-GCN 相關模型與訓練程式
+├── Visualizer.py               # 顯示分類信心值
+├── output/                     # 推論與評估結果（已忽略上傳）
+└── README.md                   # 專案說明文件（本檔案）
 ```
 
-## Reference
+---
 
-- AlphaPose : https://github.com/Amanbhandula/AlphaPose
-- ST-GCN : https://github.com/yysijie/st-gcn
+## 🚀 功能與進度
+
+- ✅ 完成整合推論流程（main.py）
+- ✅ 優化 Visualizer：僅顯示動作變換時的信心值前 3 名
+- ✅ 支援即時推論（webcam 模式）
+- ✅ 重構 `evaluation.py`：計算整體 accuracy 並寫入報表
+
+
+
+---
+
+## 💡 使用方式
+
+### 推論整個資料夾影片
+```bash
+python main.py --video_dir ./your_folder --model_type full
+```
+
+
