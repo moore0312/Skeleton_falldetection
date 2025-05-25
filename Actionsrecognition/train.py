@@ -1,5 +1,6 @@
 import os
 import time
+import csv
 import torch
 import pickle
 import numpy as np
@@ -16,16 +17,17 @@ from Actionsrecognition.Models import *
 from Visualizer import plot_graphs, plot_confusion_metrix
 from sklearn.metrics import precision_recall_fscore_support
 
-
-save_folder = 'saved/ori2'
+save_folder = 'saved/compare'
 device = 'cuda'
-epochs = 30
+epochs = 10
 batch_size = 32
+
 
 data_files = ['/home/moore/school/Human-Falling-Detect-Tracks/Data/Le2i.pkl']
 class_names = ['Standing', 'Walking', 'Sitting', 'Fall',
                'Stand up', 'Sit down', 'Falling']
 num_class = len(class_names)
+
 
 def load_dataset(data_files, batch_size, split_size=0):
     features, labels = [], []
@@ -67,10 +69,22 @@ def set_training(model, mode=True):
     model.train(mode)
     return model
 
-def build_motion(pts):
-    mot = pts[:, :2, 1:, :] - pts[:, :2, :-1, :]
-    pts = pts[:, :, 1:, :]
-    return pts, mot
+def build_motion(x):
+    """
+    給定骨架資料 x: (N, 3, T, V)
+    回傳：
+        pts: 去掉第一幀的骨架 (N, 3, T-1, V)
+        mot: 基於 (x,y) 的位移速度，並補上 1 個全 0 channel，變成 (N, 3, T-1, V)
+    """
+    dx = x[:, 0:1, 1:] - x[:, 0:1, :-1]
+    dy = x[:, 1:2, 1:] - x[:, 1:2, :-1]
+    zero = torch.zeros_like(dx)
+    mot = torch.cat((dx, dy, zero), dim=1)  # (N, 3, T-1, V)
+
+    # 去掉原始骨架的第 0 幀，對齊 mot 時間長度
+    x = x[:, :, 1:]
+
+    return x, mot
 
 if __name__ == '__main__':
     save_folder = os.path.join(os.path.dirname(__file__), save_folder)
@@ -83,18 +97,29 @@ if __name__ == '__main__':
     del train_loader
 
     graph_args = {'strategy': 'spatial'}
-    USE_LITE_MODEL = False
 
-    if USE_LITE_MODEL:
+    USE_LITE_MODEL = False
+    USE_STSAGCN_MODEL = True  # ✅ 加上這行來選擇 ST-SAGCN 模型
+
+
+    if USE_STSAGCN_MODEL:
+        from Actionsrecognition.Models import STSAGCN_Wrapper
+        model = STSAGCN_Wrapper().to(device)
+        save_name = 'stsagcn.pth'
+    elif USE_LITE_MODEL:
         from Actionsrecognition.Models import StreamSpatialTemporalGraphLite
         model = StreamSpatialTemporalGraphLite(3, graph_args, num_class).to(device)
-        save_name = 'tsstg-lite.pth'
+        save_name = 'stgcn-lite.pth'
     else:
         from Actionsrecognition.Models import TwoStreamSpatialTemporalGraph
         model = TwoStreamSpatialTemporalGraph(graph_args, num_class).to(device)
-        save_name = 'tsstg-full.pth'
+        save_name = 'stgcn-full.pth'
 
-    print(f"✅ 使用模型：{'Lite' if USE_LITE_MODEL else 'Full'}，參數總數：{sum(p.numel() for p in model.parameters()):,}")
+        
+
+    model_type = 'ST-SAGCN' if USE_STSAGCN_MODEL else ('Lite' if USE_LITE_MODEL else 'Full')
+    print(f"✅ 使用模型：{model_type}，參數總數：{sum(p.numel() for p in model.parameters()):,}")
+
 
     optimizer = Adam(model.parameters(), lr=0.001)
     # 根據你的數據量分布，手動計算 class weights（倒數比例）
@@ -106,6 +131,9 @@ if __name__ == '__main__':
 
     loss_list = {'train': [], 'valid': []}
     accu_list = {'train': [], 'valid': []}
+    precision_list = {'train': [], 'valid': []}
+    recall_list = {'train': [], 'valid': []}
+    f1_list = {'train': [], 'valid': []}
     for e in range(epochs):
         print('Epoch {}/{}'.format(e, epochs - 1))
         for phase in ['train', 'valid']:
@@ -144,11 +172,36 @@ if __name__ == '__main__':
             accu_list[phase].append(run_accu / total_samples)
 
             precision, recall, f1, _ = precision_recall_fscore_support(
-                     y_trues_epoch, y_preds_epoch, average='macro', zero_division=0)
-            print(f"  → {phase.title()} Precision: {precision:.4f}, Recall: {recall:.4f}, F1-score: {f1:.4f}") #F1-score
+                        y_trues_epoch, y_preds_epoch, average='macro', zero_division=0)
+
+            precision_list[phase].append(precision)
+            recall_list[phase].append(recall)
+            f1_list[phase].append(f1)
+
+            print(f"  → {phase.title()} Precision: {precision:.4f}, Recall: {recall:.4f}, F1-score: {f1:.4f}")
 
         print('Summary epoch:\n - Train loss: {:.4f}, accu: {:.4f}\n - Valid loss: {:.4f}, accu: {:.4f}'.format(
             loss_list['train'][-1], accu_list['train'][-1], loss_list['valid'][-1], accu_list['valid'][-1]))
+        
+                # 每 5 個 epoch 寫入訓練結果到 CSV
+        metrics_path = os.path.join(save_folder, 'training_metrics.csv')
+        write_header = not os.path.exists(metrics_path)
+        if e % 5 == 0:
+            with open(metrics_path, 'a', newline='') as csvfile:
+                writer = csv.DictWriter(csvfile, fieldnames=['epoch', 'phase', 'loss', 'accuracy', 'precision', 'recall', 'f1'])
+                if write_header:
+                    writer.writeheader()
+                for phase_out in ['train', 'valid']:
+                    writer.writerow({
+                        'epoch': e,
+                        'phase': phase_out,
+                        'loss': loss_list[phase_out][-1],
+                        'accuracy': accu_list[phase_out][-1],
+                        'precision': f"{precision:.4f}",
+                        'recall': f"{recall:.4f}",
+                        'f1': f"{f1:.4f}" 
+                    })
+
 
         torch.save(model.state_dict(), os.path.join(save_folder, save_name))
 

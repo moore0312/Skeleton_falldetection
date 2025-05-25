@@ -17,8 +17,23 @@ from PoseEstimateLoader import SPPE_FastPose
 from fn import draw_single
 from Track.Tracker import Detection, Tracker
 from ActionsEstLoader import TSSTG
+from evaluation import evaluate
 import torch.nn.functional as F  # 檔案開頭要有這行
 
+def klt_falling_check(kpt_list, threshold=0.5):
+    """
+    使用鼻子（0號 keypoint）的 Y 值，判斷是否快速下墜
+    """
+    if len(kpt_list) < 5:
+        return False
+
+    points = np.array(list(kpt_list)[-5:])  # (5, 17, 3)
+    nose_y = points[:, 0, 1]  # 取出第0號點的 Y 座標
+    dy = nose_y[1:] - nose_y[:-1]
+    avg_dy = np.mean(dy)
+
+    print(f"[KLT DEBUG] Track: {id(kpt_list)} 鼻子 dy: {avg_dy:.2f}")
+    return avg_dy > threshold
 
 
 def preproc(image, resize_fn):
@@ -109,6 +124,14 @@ def process_video(video_path, device, inp_dets, inp_pose, pose_backbone, result_
 
             action = 'pending..'
             clr = (0, 255, 0)
+            if 5 <= len(track.keypoints_list) < 30:
+                if klt_falling_check(track.keypoints_list):
+                    print(f"⚠️ 預警：Track {track.track_id} 出現快速向下移動，提前觸發 ST-GCN")
+                    while len(track.keypoints_list) < 30:
+                        track.keypoints_list.append(track.keypoints_list[-1].copy())
+                    # 在 Track 類別中新增 flag（你可以在 Track.Tracker 中初始化）
+                    track.klt_triggered = True  # 如果已用 KLT 判斷過，就不再送入一次
+
             if len(track.keypoints_list) == 30:
                 if args.sagcn:
                     pts = np.array(track.keypoints_list, dtype=np.float32)
@@ -237,11 +260,18 @@ if __name__ == '__main__':
     avg_fps = np.mean(total_fps)
     print(f"所有影片處理完成！平均 FPS: {avg_fps:.2f}")
 
+    # # 設定標註與報告輸出路徑
+    # annotation_dir = "/home/moore/school/Le2i/all/Annotation_files"
+    # output_csv = os.path.join(args.result_dir, "evaluation_report.csv")
+
     # 把FPS存成json
     fps_json_path = os.path.join(args.result_dir, 'fps.json')
     with open(fps_json_path, 'w') as f:
         json.dump(fps_per_video, f)
 
+    # print(f"\n🔍 開始評估結果...")
+    # evaluate(annotation_dir, args.result_dir, output_csv, fps_dict=fps_per_video)
+    # print(f"✅ 評估完成，結果已儲存到: {output_csv}")
 
     
 

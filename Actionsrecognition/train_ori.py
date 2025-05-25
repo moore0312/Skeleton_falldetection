@@ -7,40 +7,27 @@ import torch.nn.functional as F
 from shutil import copyfile
 from tqdm import tqdm
 from torch.utils import data
-from torch.optim.adadelta import Adadelta
+from torch.optim.adam import Adam
 from sklearn.model_selection import train_test_split
+import sys
+sys.path.append(os.path.abspath(".."))
 
 from Actionsrecognition.Models import *
 from Visualizer import plot_graphs, plot_confusion_metrix
+from sklearn.metrics import precision_recall_fscore_support
 
 
-save_folder = 'saved/TSSTG(pts+mot)-01(cf+hm-hm)'
-
+save_folder = 'saved/ori2'
 device = 'cuda'
 epochs = 30
 batch_size = 32
 
-# DATA FILES.
-# Should be in format of
-#  inputs: (N_samples, time_steps, graph_node, channels),
-#  labels: (N_samples, num_class)
-#   and do some of normalizations on it. Default data create from:
-#       Data.create_dataset_(1-3).py
-# where
-#   time_steps: Number of frame input sequence, Default: 30
-#   graph_node: Number of node in skeleton, Default: 14
-#   channels: Inputs data (x, y and scores), Default: 3
-#   num_class: Number of pose class to train, Default: 7
-
-data_files = ['/home/moore/school/Human-Falling-Detect-Tracks/Data/Home_new-set(labelXscrw).pkl']
-class_names = ['Standing', 'Walking', 'Sitting', 'Lying Down',
-               'Stand up', 'Sit down', 'Fall Down']
+data_files = ['/home/moore/school/Human-Falling-Detect-Tracks/Data/Le2i.pkl']
+class_names = ['Standing', 'Walking', 'Sitting', 'Fall',
+               'Stand up', 'Sit down', 'Falling']
 num_class = len(class_names)
 
-
 def load_dataset(data_files, batch_size, split_size=0):
-    """Load data files into torch DataLoader with/without spliting train-test.
-    """
     features, labels = [], []
     for fil in data_files:
         with open(fil, 'rb') as f:
@@ -55,21 +42,23 @@ def load_dataset(data_files, batch_size, split_size=0):
         x_train, x_valid, y_train, y_valid = train_test_split(features, labels, test_size=split_size,
                                                               random_state=9)
         train_set = data.TensorDataset(torch.tensor(x_train, dtype=torch.float32).permute(0, 3, 1, 2),
-                                       torch.tensor(y_train, dtype=torch.float32))
+                                       torch.tensor(np.argmax(y_train, axis=1), dtype=torch.long))
         valid_set = data.TensorDataset(torch.tensor(x_valid, dtype=torch.float32).permute(0, 3, 1, 2),
-                                       torch.tensor(y_valid, dtype=torch.float32))
+                                       torch.tensor(np.argmax(y_valid, axis=1), dtype=torch.long))
         train_loader = data.DataLoader(train_set, batch_size, shuffle=True)
         valid_loader = data.DataLoader(valid_set, batch_size)
     else:
         train_set = data.TensorDataset(torch.tensor(features, dtype=torch.float32).permute(0, 3, 1, 2),
-                                       torch.tensor(labels, dtype=torch.float32))
+                                       torch.tensor(np.argmax(labels, axis=1), dtype=torch.long))
         train_loader = data.DataLoader(train_set, batch_size, shuffle=True)
         valid_loader = None
     return train_loader, valid_loader
 
-
-def accuracy_batch(y_pred, y_true):
-    return (y_pred.argmax(1) == y_true.argmax(1)).mean()
+def count_correct_batch(y_pred, y_true):
+    pred_class = y_pred.argmax(1)
+    correct = (pred_class == y_true).sum().item()
+    total = y_true.size(0)
+    return correct, total
 
 
 def set_training(model, mode=True):
@@ -78,134 +67,135 @@ def set_training(model, mode=True):
     model.train(mode)
     return model
 
+def build_motion(pts):
+    mot = pts[:, :2, 1:, :] - pts[:, :2, :-1, :]
+    pts = pts[:, :, 1:, :]
+    return pts, mot
 
 if __name__ == '__main__':
     save_folder = os.path.join(os.path.dirname(__file__), save_folder)
-    if not os.path.exists(save_folder):
-        os.makedirs(save_folder)
+    os.makedirs(save_folder, exist_ok=True)
 
-    # DATA.
-    train_loader, _ = load_dataset(data_files[0:1], batch_size)
-    valid_loader, train_loader_ = load_dataset(data_files[1:2], batch_size, 0.2)
-
-    train_loader = data.DataLoader(data.ConcatDataset([train_loader.dataset, train_loader_.dataset]),
+    train_loader, valid_loader = load_dataset(data_files[0:1], batch_size, 0.2)
+    train_loader = data.DataLoader(data.ConcatDataset([train_loader.dataset, train_loader.dataset]),
                                    batch_size, shuffle=True)
     dataloader = {'train': train_loader, 'valid': valid_loader}
-    del train_loader_
+    del train_loader
 
-    # MODEL.
     graph_args = {'strategy': 'spatial'}
-    model = TwoStreamSpatialTemporalGraph(graph_args, num_class).to(device)
+    USE_LITE_MODEL = False
 
-    #optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-    optimizer = Adadelta(model.parameters())
+    if USE_LITE_MODEL:
+        from Actionsrecognition.Models import StreamSpatialTemporalGraphLite
+        model = StreamSpatialTemporalGraphLite(3, graph_args, num_class).to(device)
+        save_name = 'tsstg-lite.pth'
+    else:
+        from Actionsrecognition.Models import TwoStreamSpatialTemporalGraph
+        model = TwoStreamSpatialTemporalGraph(graph_args, num_class).to(device)
+        save_name = 'tsstg-full.pth'
 
-    losser = torch.nn.BCELoss()
+    print(f"✅ 使用模型：{'Lite' if USE_LITE_MODEL else 'Full'}，參數總數：{sum(p.numel() for p in model.parameters()):,}")
 
-    # TRAINING.
+    optimizer = Adam(model.parameters(), lr=0.001)
+    # 根據你的數據量分布，手動計算 class weights（倒數比例）
+    class_counts = torch.tensor([7227, 8484, 4852, 4243, 2060, 982, 2099], dtype=torch.float32)
+    class_weights = 1.0 / class_counts
+    class_weights = class_weights / class_weights.sum() * len(class_counts)  # normalize 總和為 num_class
+
+    losser = torch.nn.CrossEntropyLoss(weight=class_weights.to(device))
+
     loss_list = {'train': [], 'valid': []}
     accu_list = {'train': [], 'valid': []}
     for e in range(epochs):
         print('Epoch {}/{}'.format(e, epochs - 1))
         for phase in ['train', 'valid']:
-            if phase == 'train':
-                model = set_training(model, True)
-            else:
-                model = set_training(model, False)
+            model = set_training(model, phase == 'train')
+            run_loss, run_accu = 0.0, 0.0
+            total_samples = 0
+            y_preds_epoch = []
+            y_trues_epoch = [] #for F1-score
 
-            run_loss = 0.0
-            run_accu = 0.0
             with tqdm(dataloader[phase], desc=phase) as iterator:
+
                 for pts, lbs in iterator:
-                    # Create motion input by distance of points (x, y) of the same node
-                    # in two frames.
-                    mot = pts[:, :2, 1:, :] - pts[:, :2, :-1, :]
+                    pts, mot = build_motion(pts)
+                    pts, mot, lbs = pts.to(device), mot.to(device), lbs.to(device)
 
-                    mot = mot.to(device)
-                    pts = pts.to(device)
-                    lbs = lbs.to(device)
-
-                    # Forward.
                     out = model((pts, mot))
                     loss = losser(out, lbs)
 
+                    y_preds_epoch.extend(out.argmax(1).detach().cpu().numpy()) 
+                    y_trues_epoch.extend(lbs.detach().cpu().numpy()) #for F1-score
+
                     if phase == 'train':
-                        # Backward.
-                        model.zero_grad()
+                        optimizer.zero_grad()
                         loss.backward()
                         optimizer.step()
 
                     run_loss += loss.item()
-                    accu = accuracy_batch(out.detach().cpu().numpy(),
-                                          lbs.detach().cpu().numpy())
-                    run_accu += accu
+                    correct, total = count_correct_batch(out.detach().cpu(), lbs.detach().cpu())
+                    run_accu += correct
+                    total_samples += total
 
-                    iterator.set_postfix_str(' loss: {:.4f}, accu: {:.4f}'.format(
-                        loss.item(), accu))
-                    iterator.update()
-                    #break
+
+                    iterator.set_postfix_str(' loss: {:.4f}, accu: {:.4f}'.format(loss.item(), run_accu / total_samples))
+
             loss_list[phase].append(run_loss / len(iterator))
-            accu_list[phase].append(run_accu / len(iterator))
-            #break
+            accu_list[phase].append(run_accu / total_samples)
 
-        print('Summary epoch:\n - Train loss: {:.4f}, accu: {:.4f}\n - Valid loss:'
-              ' {:.4f}, accu: {:.4f}'.format(loss_list['train'][-1], accu_list['train'][-1],
-                                             loss_list['valid'][-1], accu_list['valid'][-1]))
+            precision, recall, f1, _ = precision_recall_fscore_support(
+                     y_trues_epoch, y_preds_epoch, average='macro', zero_division=0)
+            print(f"  → {phase.title()} Precision: {precision:.4f}, Recall: {recall:.4f}, F1-score: {f1:.4f}") #F1-score
 
-        # SAVE.
-        torch.save(model.state_dict(), os.path.join(save_folder, 'tsstg-model.pth'))
+        print('Summary epoch:\n - Train loss: {:.4f}, accu: {:.4f}\n - Valid loss: {:.4f}, accu: {:.4f}'.format(
+            loss_list['train'][-1], accu_list['train'][-1], loss_list['valid'][-1], accu_list['valid'][-1]))
+
+        torch.save(model.state_dict(), os.path.join(save_folder, save_name))
 
         plot_graphs(list(loss_list.values()), list(loss_list.keys()),
-                    'Last Train: {:.2f}, Valid: {:.2f}'.format(
-                        loss_list['train'][-1], loss_list['valid'][-1]
-                    ), 'Loss', xlim=[0, epochs],
+                    'Last Train: {:.2f}, Valid: {:.2f}'.format(loss_list['train'][-1], loss_list['valid'][-1]),
+                    'Loss', xlim=[0, epochs],
                     save=os.path.join(save_folder, 'loss_graph.png'))
         plot_graphs(list(accu_list.values()), list(accu_list.keys()),
-                    'Last Train: {:.2f}, Valid: {:.2f}'.format(
-                        accu_list['train'][-1], accu_list['valid'][-1]
-                    ), 'Accu', xlim=[0, epochs],
+                    'Last Train: {:.2f}, Valid: {:.2f}'.format(accu_list['train'][-1], accu_list['valid'][-1]),
+                    'Accu', xlim=[0, epochs],
                     save=os.path.join(save_folder, 'accu_graph.png'))
 
-        #break
-
-    del train_loader, valid_loader
-
-    model.load_state_dict(torch.load(os.path.join(save_folder, 'tsstg-model.pth')))
+    model.load_state_dict(torch.load(os.path.join(save_folder, save_name)))
 
     # EVALUATION.
     model = set_training(model, False)
-    data_file = data_files[1]
+    data_file = data_files[0]
     eval_loader, _ = load_dataset([data_file], 32)
 
     print('Evaluation.')
     run_loss = 0.0
-    run_accu = 0.0
+    total_correct = 0
+    total_samples = 0
     y_preds = []
     y_trues = []
+
     with tqdm(eval_loader, desc='eval') as iterator:
         for pts, lbs in iterator:
-            mot = pts[:, :2, 1:, :] - pts[:, :2, :-1, :]
-            mot = mot.to(device)
-            pts = pts.to(device)
-            lbs = lbs.to(device)
+            pts, mot = build_motion(pts)
+            pts, mot, lbs = pts.to(device), mot.to(device), lbs.to(device)
 
             out = model((pts, mot))
             loss = losser(out, lbs)
-
             run_loss += loss.item()
-            accu = accuracy_batch(out.detach().cpu().numpy(),
-                                  lbs.detach().cpu().numpy())
-            run_accu += accu
+
+            correct, total = count_correct_batch(out.detach().cpu(), lbs.detach().cpu())
+            total_correct += correct
+            total_samples += total
 
             y_preds.extend(out.argmax(1).detach().cpu().numpy())
-            y_trues.extend(lbs.argmax(1).cpu().numpy())
+            y_trues.extend(lbs.detach().cpu().numpy())
 
-            iterator.set_postfix_str(' loss: {:.4f}, accu: {:.4f}'.format(
-                loss.item(), accu))
-            iterator.update()
+            iterator.set_postfix_str(' loss: {:.4f}, accu: {:.4f}'.format(loss.item(), correct / total))
 
     run_loss = run_loss / len(iterator)
-    run_accu = run_accu / len(iterator)
+    run_accu = total_correct / total_samples
+
 
     plot_confusion_metrix(y_trues, y_preds, class_names, 'Eval on: {}\nLoss: {:.4f}, Accu{:.4f}'.format(
         os.path.basename(data_file), run_loss, run_accu

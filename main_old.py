@@ -17,6 +17,7 @@ from PoseEstimateLoader import SPPE_FastPose
 from fn import draw_single
 from Track.Tracker import Detection, Tracker
 from ActionsEstLoader import TSSTG
+from evaluation import evaluate
 import torch.nn.functional as F  # 檔案開頭要有這行
 
 
@@ -37,21 +38,11 @@ def process_video(video_path, device, inp_dets, inp_pose, pose_backbone, result_
     
     detect_model = TinyYOLOv3_onecls(inp_dets, device=device)
     pose_model = SPPE_FastPose(pose_backbone, inp_pose[0], inp_pose[1], device=device)
-
-    if args.sagcn:
-        from Actionsrecognition.ST_SAGCN import STSAGCN_Wrapper
-        action_model = STSAGCN_Wrapper(num_classes=7).to(device)
-        weight_path = '/home/moore/school/Human-Falling-Detect-Tracks/Actionsrecognition/saved/compare/ST_sagcn.pth'
-        action_model.load_state_dict(torch.load(weight_path, map_location=device))
-        action_model.eval()
-    else:
-        action_model = TSSTG(
-            weight_file='/home/moore/school/Human-Falling-Detect-Tracks/Actionsrecognition/saved/lite/tsstg-lite.pth'
-            if args.lite else '/home/moore/school/Human-Falling-Detect-Tracks/Actionsrecognition/saved/ori2/tsstg-full.pth',
-            use_lite=args.lite,
-            device=device
-        )
-
+    action_model = TSSTG(
+    weight_file='/home/moore/school/Human-Falling-Detect-Tracks/Actionsrecognition/saved/lite/tsstg-lite.pth' if args.lite else '/home/moore/school/Human-Falling-Detect-Tracks/Actionsrecognition/saved/ori2/tsstg-full.pth',
+    use_lite=args.lite,
+    device=args.device
+)
 
     resize_fn = ResizePadding(inp_dets, inp_dets)
     if video_path == "webcam":
@@ -110,23 +101,12 @@ def process_video(video_path, device, inp_dets, inp_pose, pose_backbone, result_
             action = 'pending..'
             clr = (0, 255, 0)
             if len(track.keypoints_list) == 30:
-                if args.sagcn:
-                    pts = np.array(track.keypoints_list, dtype=np.float32)
-                    pts_tensor = torch.tensor(pts.transpose(2, 0, 1)).unsqueeze(0).to(device)
-                    mot_tensor = pts_tensor[:, :, 1:, :] - pts_tensor[:, :, :-1, :]
-                    pts_tensor = pts_tensor[:, :, 1:, :]
-                    out = action_model((pts_tensor, mot_tensor)).detach().cpu().numpy()
-                    out_tensor = torch.tensor(out[0])
-                    prob = F.softmax(out_tensor, dim=0)
-                    action_idx = prob.argmax().item()
-                    action_name = action_model.class_names[action_idx]
-                else:
-                    pts = np.array(track.keypoints_list, dtype=np.float32)
-                    out = action_model.predict(pts, frame.shape[:2])
-                    out_tensor = torch.tensor(out[0])
-                    prob = F.softmax(out_tensor, dim=0)
-                    action_idx = prob.argmax().item()
-                    action_name = action_model.class_names[action_idx]
+                pts = np.array(track.keypoints_list, dtype=np.float32)
+                out = action_model.predict(pts, frame.shape[:2])
+                out_tensor = torch.tensor(out[0])  # 轉成 tensor
+                prob = F.softmax(out_tensor, dim=0)  # 機率分布
+                action_idx = prob.argmax().item()
+                action_name = action_model.class_names[action_idx]
                 action = '{}'.format(action_name)
                 pts = np.array(track.keypoints_list, dtype=np.float32)
 
@@ -190,9 +170,7 @@ if __name__ == '__main__':
     par.add_argument('--device', type=str, default='cuda', help='Device to run model on cpu or cuda.')
     par.add_argument('--save', action='store_true', help='Save the processed video output.')
     par.add_argument('--lite', action='store_true', help='Use Lite TSSTG model')
-    par.add_argument('--sagcn', action='store_true', help='Use ST-SAGCN model')
     par.add_argument('--cam', action='store_true', help='Use webcam as input source')
-
 
 
     args = par.parse_args()
@@ -202,19 +180,12 @@ if __name__ == '__main__':
     elif args.video:
         video_list = [args.video]
     elif args.folder:
-        video_list = natsorted(
-            glob.glob(os.path.join(args.folder, '*.avi'))+
-            glob.glob(os.path.join(args.folder, '*.mp4'))
-        )
+        video_list = natsorted(glob.glob(os.path.join(args.folder, '*.avi')))
     else:
         raise ValueError("You must provide either --video or --folder ")
 
     
-    if args.sagcn:
-        print("🔧 使用的模型：ST-SAGCN")
-    else:
-        print(f"🔧 使用的 TSSTG 模型：{'Lite' if args.lite else 'Full'}")
-
+    print(f"🔧 使用的 TSSTG 模型：{'Lite' if args.lite else 'Full'}")
     total_fps = []
     fps_per_video = {}
 
@@ -237,11 +208,18 @@ if __name__ == '__main__':
     avg_fps = np.mean(total_fps)
     print(f"所有影片處理完成！平均 FPS: {avg_fps:.2f}")
 
+    # 設定標註與報告輸出路徑
+    annotation_dir = "/home/moore/school/Le2i/Lecture_room/annotation"
+    output_csv = os.path.join(args.result_dir, "evaluation_report.csv")
+
     # 把FPS存成json
     fps_json_path = os.path.join(args.result_dir, 'fps.json')
     with open(fps_json_path, 'w') as f:
         json.dump(fps_per_video, f)
 
+    print(f"\n🔍 開始評估結果...")
+    evaluate(annotation_dir, args.result_dir, output_csv, fps_dict=fps_per_video)
+    print(f"✅ 評估完成，結果已儲存到: {output_csv}")
 
     
 

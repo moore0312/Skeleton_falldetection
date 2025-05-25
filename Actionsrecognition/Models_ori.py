@@ -8,6 +8,8 @@ import numpy as np
 from Actionsrecognition.Utils import Graph
 
 
+
+
 class GraphConvolution(nn.Module):
     """The basic module for applying a graph convolution.
     Args:
@@ -225,20 +227,79 @@ class TwoStreamSpatialTemporalGraph(nn.Module):
     def __init__(self, graph_args, num_class, edge_importance_weighting=True,
                  **kwargs):
         super().__init__()
-        self.pts_stream = StreamSpatialTemporalGraph(3, graph_args, None,
+        self.shared_stream = StreamSpatialTemporalGraph(3, graph_args, num_class,
                                                      edge_importance_weighting,
                                                      **kwargs)
-        self.mot_stream = StreamSpatialTemporalGraph(2, graph_args, None,
-                                                     edge_importance_weighting,
-                                                     **kwargs)
-
-        self.fcn = nn.Linear(256 * 2, num_class)
 
     def forward(self, inputs):
-        out1 = self.pts_stream(inputs[0])
-        out2 = self.mot_stream(inputs[1])
-
-        concat = torch.cat([out1, out2], dim=-1)
-        out = self.fcn(concat)
-
+        x_joint = inputs[0]  # 把前 1 幀切掉
+        x_vel = inputs[1]  # shape: (N, 2, 29, V)
+        # pad 第三個 channel 給 x_vel（score 為 0）
+        zeros = torch.zeros_like(x_vel[:, :1, :, :])
+        x_vel_padded = torch.cat((x_vel, zeros), dim=1)  # → (N, 3, 29, V)
+        x_fused = x_joint + x_vel_padded
+        out = self.shared_stream(x_fused)
         return torch.sigmoid(out)
+        
+
+
+
+
+class StreamSpatialTemporalGraphLite(nn.Module):
+    """簡化版 Spatial Temporal Graph Convolutional Network"""
+    def __init__(self, in_channels, graph_args, num_class=None,
+                 edge_importance_weighting=False, **kwargs):
+        super().__init__()
+        graph = Graph(**graph_args)
+        A = torch.tensor(graph.A, dtype=torch.float32, requires_grad=False)
+        self.register_buffer('A', A)
+
+        spatial_kernel_size = A.size(0)
+        temporal_kernel_size = 9
+        kernel_size = (temporal_kernel_size, spatial_kernel_size)
+        kwargs0 = {k: v for k, v in kwargs.items() if k != 'dropout'}
+
+        self.data_bn = nn.BatchNorm1d(in_channels * A.size(1))
+        self.st_gcn_networks = nn.ModuleList((
+            st_gcn(in_channels, 32, kernel_size, 1, residual=False, **kwargs0),
+            st_gcn(32, 64, kernel_size, 2, **kwargs),
+            st_gcn(64, 64, kernel_size, 1, **kwargs),
+            st_gcn(64, 128, kernel_size, 2, **kwargs)
+        ))
+
+        if edge_importance_weighting:
+            self.edge_importance = nn.ParameterList([
+                nn.Parameter(torch.ones(A.size()))
+                for _ in self.st_gcn_networks
+            ])
+        else:
+            self.edge_importance = [1] * len(self.st_gcn_networks)
+
+        if num_class is not None:
+            self.cls = nn.Conv2d(128, num_class, kernel_size=1)
+        else:
+            self.cls = lambda x: x
+
+    def forward(self, x):
+        if isinstance(x, tuple):  # joint + motion
+            pts = x[0]
+            mot = x[1]
+            # 如果 mot 是 2 channel 才補（為了訓練時）
+            if mot.shape[1] == 2:
+                zeros = torch.zeros_like(mot[:, :1, :, :])  # (N, 1, T, V)
+                mot = torch.cat((mot, zeros), dim=1)        # → (N, 3, T, V)
+            x = pts + mot
+
+        N, C, T, V = x.size()
+
+        x = x.permute(0, 3, 1, 2).contiguous().view(N, V * C, T)
+        x = self.data_bn(x)
+        x = x.view(N, V, C, T).permute(0, 2, 3, 1).contiguous().view(N, C, T, V)
+
+        for gcn, importance in zip(self.st_gcn_networks, self.edge_importance):
+            x = gcn(x, self.A * importance)
+
+        x = F.avg_pool2d(x, x.size()[2:])
+        x = self.cls(x)
+        x = x.view(x.size(0), -1)
+        return x

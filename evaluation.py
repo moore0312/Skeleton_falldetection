@@ -5,29 +5,7 @@ import csv
 from natsort import natsorted
 import json
 
-def read_annotation(annotation_file):
-    with open(annotation_file, 'r') as f:
-        lines = f.readlines()
-        start_frame = int(lines[0].strip())
-        end_frame = int(lines[1].strip())
-    return start_frame, end_frame
-
-def read_result(result_file):
-    with open(result_file, 'r') as f:
-        lines = f.readlines()
-        fall_flag = lines[0].strip() == 'fall'
-        result_frames = set()
-        for line in lines[1:]:
-            frame, flag = line.strip().split(',')
-            if int(flag) == 1:
-                result_frames.add(int(frame))
-    return fall_flag, result_frames
-
-def format_score(score):
-    return '-' if score == '-' else f"{score:.2f}"
-
 def evaluate(annotation_dir, result_dir, output_csv, fps_dict=None):
-
     correct_video_preds = 0
     total_video_preds = 0
 
@@ -50,11 +28,17 @@ def evaluate(annotation_dir, result_dir, output_csv, fps_dict=None):
                 print(f"❌ Result not found: {video_name}")
                 continue
 
+            # 讀取 annotation：兩行為 0 0 表示沒跌倒，否則為有跌倒
             with open(annotation_file, 'r') as f:
-                start_frame = int(f.readline().strip())
-                end_frame = int(f.readline().strip())
+                lines = f.readlines()
+                if len(lines) < 2:
+                    print(f"⚠️ Invalid annotation file: {annotation_file}")
+                    continue
+                start_frame = int(lines[0].strip())
+                end_frame = int(lines[1].strip())
                 has_fall = not (start_frame == 0 and end_frame == 0)
 
+            # 讀取 result：第一行是否為 'fall'
             with open(result_file, 'r') as f:
                 lines = f.readlines()
                 fall_detected = lines[0].strip() == 'fall'
@@ -65,13 +49,19 @@ def evaluate(annotation_dir, result_dir, output_csv, fps_dict=None):
             total_video_preds += 1
             if is_correct:
                 correct_video_preds += 1
-            fps = fps_dict.get(video_name, None)
+
+            fps = fps_dict.get(video_name, None) if fps_dict else None
             fps_str = f"{fps:.2f}" if fps is not None else '-'
+
+            # ➕ 把準確率寫進 result 檔案最下面
+            with open(result_file, 'a') as rf:
+                rf.write(f"\nVideo Accuracy: {video_accuracy * 100:.2f}%\n")
 
             writer.writerow({
                 'Video Name': video_name,
                 'Has Fall (GT)': 'Yes' if has_fall else 'No',
                 'Fall Detected': 'Yes' if fall_detected else 'No',
+                'Video Accuracy': f"{video_accuracy:.2f}",
                 'Video Result': video_result,
                 'FPS': fps_str
             })
@@ -86,20 +76,27 @@ def evaluate(annotation_dir, result_dir, output_csv, fps_dict=None):
             overall_acc = correct_video_preds / total_video_preds
             writer.writerow({
                 'Video Name': 'Average FPS',
-                'Has Fall (GT)': '-', 'Fall Detected': '-', 'Video Result': '-','Video Accuracy': f"{overall_acc:.4f}", 'FPS': f"{avg_fps:.2f}"
+                'Has Fall (GT)': '-', 'Fall Detected': '-', 'Video Result': '-',
+                'Video Accuracy': f"{overall_acc:.4f}", 'FPS': f"{avg_fps:.2f}"
             })
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Evaluate fall detection results.')
-    parser.add_argument('--annotation_dir', type=str, required=True, help='Directory of annotation files.')
     parser.add_argument('--result_dir', type=str, required=True, help='Directory of result files.')
     parser.add_argument('--output_csv', type=str, required=True, help='Path to save the CSV report.')
     parser.add_argument('--fps_json', type=str, default=None, help='JSON file storing FPS per video')
+    parser.add_argument('--dataset', type=str, choices=['le2i', 'urfd'], required=True, help='Specify dataset')
     args = parser.parse_args()
 
-    # 讀json
+    # 根據資料集選 annotation 路徑
+    if args.dataset == 'le2i':
+        annotation_dir = "/home/moore/school/Le2i/all/Annotation_files"
+    else:
+        annotation_dir = "/home/moore/school/URFD/annotation"
+
     fps_dict = None
     if args.fps_json and os.path.exists(args.fps_json):
         with open(args.fps_json, 'r') as f:
             fps_dict = json.load(f)
 
-    evaluate(args.annotation_dir, args.result_dir, args.output_csv, fps_dict=fps_dict)
+    evaluate(annotation_dir, args.result_dir, args.output_csv, fps_dict=fps_dict)

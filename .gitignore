@@ -20,3 +20,7 @@ Actionsrecognition/saved/
 # System/IDE files
 .DS_Store
 .vscode/
+
+# Temporary or generated
+Tool/main copy.py
+project_tree.txt
